@@ -2467,6 +2467,13 @@ gtk_widget_class_init (GtkWidgetClass *klass)
 							       0.0, 1.0, 0.04,
 							       GTK_PARAM_READABLE));
 
+  gtk_widget_class_install_style_property (klass,
+                                           g_param_spec_boolean ("window-dragging",
+                                                                 P_("Window dragging"),
+                                                                 P_("Window dragging"),
+                                                                 FALSE,
+                                                                 GTK_PARAM_READWRITE));
+
   /**
    * GtkWidget:draw-border:
    *
