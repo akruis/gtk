@@ -450,7 +450,17 @@ gtk_rc_get_im_module_file (void)
       if (im_module_file)
 	result = g_strdup (im_module_file);
       else
-	result = g_build_filename (GTK_SYSCONFDIR, "gtk-2.0", "gtk.immodules", NULL);
+        {
+          result = g_build_filename (GTK_SYSCONFDIR, "gtk-2.0", GTK_HOST, 
+                                     "gtk.immodules", NULL);
+          if (!g_file_test (result, G_FILE_TEST_EXISTS))
+            {
+              g_free (result);
+             
+              result = g_build_filename (GTK_SYSCONFDIR, "gtk-2.0", 
+                                        "gtk.immodules", NULL);
+            }
+        }
     }
 
   return result;
