@@ -906,10 +906,10 @@ libgtk_win32_2_0_la_SOURCES = $(gtk_c_sources)
 libgtk_quartz_2_0_la_SOURCES = $(gtk_c_sources)
 libgtk_directfb_2_0_la_SOURCES = $(gtk_c_sources)
 
-libgtk_x11_2_0_la_LDFLAGS = $(libtool_opts)
+libgtk_x11_2_0_la_LDFLAGS = $(libtool_opts) -lgmodule-2.0
 libgtk_win32_2_0_la_LDFLAGS = $(libtool_opts) -Wl,-luuid
 libgtk_quartz_2_0_la_LDFLAGS = $(libtool_opts)
-libgtk_directfb_2_0_la_LDFLAGS = $(libtool_opts)
+libgtk_directfb_2_0_la_LDFLAGS = $(libtool_opts) -lgmodule-2.0
 
 libgtk_x11_2_0_la_LIBADD = $(libadd)
 libgtk_win32_2_0_la_LIBADD = $(libadd) -lole32 -lgdi32 -lcomdlg32 -lwinspool -lcomctl32
