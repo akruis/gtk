@@ -1212,7 +1212,7 @@ if test "x$gdktarget" = "xx11"; then
 
   # Checks for Xcomposite extension
 
-  if $PKG_CONFIG --exists xcomposite ; then
+  if test "x$DISABLE_X11_COMPOSITE" = "x" && $PKG_CONFIG --exists xcomposite ; then
     AC_DEFINE(HAVE_XCOMPOSITE, 1, [Have the XCOMPOSITE X extension])
 
     X_PACKAGES="$X_PACKAGES xcomposite"
