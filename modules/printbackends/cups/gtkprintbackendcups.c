@@ -533,6 +533,7 @@ add_cups_options (const gchar *key,
 
   key = key + strlen ("cups-");
 
+#ifdef HAVE_CUPS_API_1_2
   if (printer && printer->ppd_file)
     {
       ppd_coption_t *coption;
@@ -557,6 +558,7 @@ add_cups_options (const gchar *key,
             custom_value = TRUE;
         }
     }
+#endif
 
   /* Add "Custom." prefix to custom values if not already added. */
   if (custom_value && !g_str_has_prefix (value, "Custom."))
