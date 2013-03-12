@@ -63,7 +63,7 @@
 
 #define DEFAULT_TITLE		N_("Select a File")
 #define DESKTOP_DISPLAY_NAME	N_("Desktop")
-#define FALLBACK_DISPLAY_NAME	N_("(None)")
+#define FALLBACK_DISPLAY_NAME	N_("(None)") /* this string is used in gtk+/gtk/tests/filechooser.c - change it there if you change it here */
 #define FALLBACK_ICON_NAME	"stock_unknown"
 #define FALLBACK_ICON_SIZE	16
 
@@ -114,6 +114,7 @@ typedef enum
   ROW_TYPE_CURRENT_FOLDER,
   ROW_TYPE_OTHER_SEPARATOR,
   ROW_TYPE_OTHER,
+  ROW_TYPE_EMPTY_SELECTION,
 
   ROW_TYPE_INVALID = -1
 }
@@ -252,8 +253,9 @@ static gint          model_get_type_position      (GtkFileChooserButton *button,
 						   RowType               row_type);
 static void          model_free_row_data          (GtkFileChooserButton *button,
 						   GtkTreeIter          *iter);
-static inline void   model_add_special            (GtkFileChooserButton *button);
-static inline void   model_add_other              (GtkFileChooserButton *button);
+static void          model_add_special            (GtkFileChooserButton *button);
+static void          model_add_other              (GtkFileChooserButton *button);
+static void          model_add_empty_selection    (GtkFileChooserButton *button);
 static void          model_add_volumes            (GtkFileChooserButton *button,
 						   GSList               *volumes);
 static void          model_add_bookmarks          (GtkFileChooserButton *button,
@@ -287,6 +289,9 @@ static void     fs_bookmarks_changed_cb          (GtkFileSystem  *fs,
 						  gpointer        user_data);
 
 static void     combo_box_changed_cb             (GtkComboBox    *combo_box,
+						  gpointer        user_data);
+static void     combo_box_notify_popup_shown_cb  (GObject        *object,
+						  GParamSpec     *pspec,
 						  gpointer        user_data);
 
 static void     button_clicked_cb                (GtkButton      *real_button,
@@ -486,17 +491,20 @@ gtk_file_chooser_button_init (GtkFileChooserButton *button)
   /* Keep in sync with columns enum, line 88 */
   priv->model =
     GTK_TREE_MODEL (gtk_list_store_new (NUM_COLUMNS,
-					GDK_TYPE_PIXBUF, /* Icon */
-					G_TYPE_STRING,	 /* Display Name */
-					G_TYPE_CHAR,	 /* Row Type */
-					G_TYPE_POINTER	 /* Volume || Path */,
-					G_TYPE_BOOLEAN   /* Is Folder? */,
-					G_TYPE_POINTER	 /* cancellable */));
+					GDK_TYPE_PIXBUF, /* ICON_COLUMN */
+					G_TYPE_STRING,	 /* DISPLAY_NAME_COLUMN */
+					G_TYPE_CHAR,	 /* TYPE_COLUMN */
+					G_TYPE_POINTER	 /* DATA_COLUMN (Volume || Path) */,
+					G_TYPE_BOOLEAN   /* IS_FOLDER_COLUMN */,
+					G_TYPE_POINTER	 /* CANCELLABLE_COLUMN */));
 
   priv->combo_box = gtk_combo_box_new ();
-  priv->combo_box_changed_id =
-    g_signal_connect (priv->combo_box, "changed",
-		      G_CALLBACK (combo_box_changed_cb), button);
+  priv->combo_box_changed_id = g_signal_connect (priv->combo_box, "changed",
+						 G_CALLBACK (combo_box_changed_cb), button);
+
+  g_signal_connect (priv->combo_box, "notify::popup-shown",
+		    G_CALLBACK (combo_box_notify_popup_shown_cb), button);
+
   gtk_container_add (GTK_CONTAINER (button), priv->combo_box);
 
   priv->icon_cell = gtk_cell_renderer_pixbuf_new ();
@@ -568,6 +576,8 @@ gtk_file_chooser_button_set_current_folder (GtkFileChooser    *chooser,
 
       priv->current_folder_while_inactive = g_object_ref (file);
 
+      update_combo_box (button);
+
       g_signal_emit_by_name (button, "current-folder-changed");
 
       return TRUE;
@@ -616,6 +626,9 @@ gtk_file_chooser_button_select_file (GtkFileChooser *chooser,
 
       priv->selection_while_inactive = g_object_ref (file);
 
+      update_label_and_image (button);
+      update_combo_box (button);
+
       return TRUE;
     }
 }
@@ -642,6 +655,9 @@ gtk_file_chooser_button_unselect_file (GtkFileChooser *chooser,
 	      g_object_unref (priv->selection_while_inactive);
 	      priv->selection_while_inactive = NULL;
 	    }
+
+	  update_label_and_image (button);
+	  update_combo_box (button);
 	}
     }
 }
@@ -664,41 +680,43 @@ gtk_file_chooser_button_unselect_all (GtkFileChooser *chooser)
 	{
 	  g_object_unref (priv->selection_while_inactive);
 	  priv->selection_while_inactive = NULL;
+
+	  update_label_and_image (button);
+	  update_combo_box (button);
 	}
     }
 }
 
-static GSList *
-gtk_file_chooser_button_get_files (GtkFileChooser *chooser)
+static GFile *
+get_selected_file (GtkFileChooserButton *button)
 {
-  GtkFileChooserButton *button = GTK_FILE_CHOOSER_BUTTON (chooser);
   GtkFileChooserButtonPrivate *priv = button->priv;
-  GtkFileChooser *delegate;
-
-  delegate = g_object_get_qdata (G_OBJECT (chooser),
-				 GTK_FILE_CHOOSER_DELEGATE_QUARK);
 
   if (priv->active)
-    return gtk_file_chooser_get_files (delegate);
+    return gtk_file_chooser_get_file (GTK_FILE_CHOOSER (priv->dialog));
   else
     {
-      GSList *result;
-
-      result = NULL;
-
       if (priv->selection_while_inactive)
-	result = g_slist_prepend (NULL, g_object_ref (priv->selection_while_inactive));
+	return g_object_ref (priv->selection_while_inactive);
       else if (gtk_file_chooser_get_action (GTK_FILE_CHOOSER (priv->dialog)) == GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER)
 	{
 	  /* If there is no "real" selection in SELECT_FOLDER mode, then we'll just return
 	   * the current folder, since that is what GtkFileChooserDefault would do.
 	   */
 	  if (priv->current_folder_while_inactive)
-	    result = g_slist_prepend (NULL, g_object_ref (priv->current_folder_while_inactive));
+	    return g_object_ref (priv->current_folder_while_inactive);
 	}
-
-      return result;
     }
+
+  return NULL;
+}
+
+static GSList *
+gtk_file_chooser_button_get_files (GtkFileChooser *chooser)
+{
+  GtkFileChooserButton *button = GTK_FILE_CHOOSER_BUTTON (chooser);
+
+  return g_slist_prepend (NULL, get_selected_file (button));
 }
 
 static gboolean
@@ -876,6 +894,8 @@ gtk_file_chooser_button_constructor (GType                  type,
 
   model_add_other (button);
 
+  model_add_empty_selection (button);
+
   priv->filter_model = gtk_tree_model_filter_new (priv->model, NULL);
   gtk_tree_model_filter_set_visible_func (GTK_TREE_MODEL_FILTER (priv->filter_model),
 					  filter_model_visible_func,
@@ -899,6 +919,9 @@ gtk_file_chooser_button_constructor (GType                  type,
   priv->fs_bookmarks_changed_id =
     g_signal_connect (priv->fs, "bookmarks-changed",
 		      G_CALLBACK (fs_bookmarks_changed_cb), object);
+
+  update_label_and_image (button);
+  update_combo_box (button);
 
   return object;
 }
@@ -1707,6 +1730,11 @@ model_get_type_position (GtkFileChooserButton *button,
   if (row_type == ROW_TYPE_OTHER)
     return retval;
 
+  retval++;
+
+  if (row_type == ROW_TYPE_EMPTY_SELECTION)
+    return retval;
+
   g_assert_not_reached ();
   return -1;
 }
@@ -1810,7 +1838,7 @@ out:
   g_object_unref (cancellable);
 }
 
-static inline void
+static void
 model_add_special (GtkFileChooserButton *button)
 {
   const gchar *homedir;
@@ -1931,7 +1959,7 @@ model_add_volumes (GtkFileChooserButton *button,
               base_file = _gtk_file_system_volume_get_root (volume);
               if (base_file != NULL)
                 {
-                  if (!g_file_is_native (base_file))
+                  if (!_gtk_file_has_native_path (base_file))
                     {
                       g_object_unref (base_file);
                       continue;
@@ -1991,7 +2019,7 @@ model_add_bookmarks (GtkFileChooserButton *button,
 
       file = l->data;
 
-      if (g_file_is_native (file))
+      if (_gtk_file_has_native_path (file))
 	{
 	  gtk_list_store_insert (store, &iter, pos);
 	  gtk_list_store_set (store, &iter,
@@ -2146,7 +2174,7 @@ model_update_current_folder (GtkFileChooserButton *button,
     }
 }
 
-static inline void
+static void
 model_add_other (GtkFileChooserButton *button)
 {
   GtkListStore *store;
@@ -2172,6 +2200,26 @@ model_add_other (GtkFileChooserButton *button)
 		      ICON_COLUMN, NULL,
 		      DISPLAY_NAME_COLUMN, _("Other..."),
 		      TYPE_COLUMN, ROW_TYPE_OTHER,
+		      DATA_COLUMN, NULL,
+		      IS_FOLDER_COLUMN, FALSE,
+		      -1);
+}
+
+static void
+model_add_empty_selection (GtkFileChooserButton *button)
+{
+  GtkListStore *store;
+  GtkTreeIter iter;
+  gint pos;
+  
+  store = GTK_LIST_STORE (button->priv->model);
+  pos = model_get_type_position (button, ROW_TYPE_EMPTY_SELECTION);
+
+  gtk_list_store_insert (store, &iter, pos);
+  gtk_list_store_set (store, &iter,
+		      ICON_COLUMN, NULL,
+		      DISPLAY_NAME_COLUMN, _(FALLBACK_DISPLAY_NAME),
+		      TYPE_COLUMN, ROW_TYPE_EMPTY_SELECTION,
 		      DATA_COLUMN, NULL,
 		      IS_FOLDER_COLUMN, FALSE,
 		      -1);
@@ -2204,7 +2252,7 @@ model_remove_rows (GtkFileChooserButton *button,
 }
 
 /* Filter Model */
-static inline gboolean
+static gboolean
 test_if_file_is_visible (GtkFileSystem *fs,
 			 GFile         *file,
 			 gboolean       local_only,
@@ -2213,7 +2261,7 @@ test_if_file_is_visible (GtkFileSystem *fs,
   if (!file)
     return FALSE;
 
-  if (local_only && !g_file_is_native (file))
+  if (local_only && !_gtk_file_has_native_path (file))
     return FALSE;
 
   if (!is_folder)
@@ -2266,7 +2314,7 @@ filter_model_visible_func (GtkTreeModel *model,
 
 		if (base_file)
 		  {
-		    if (!g_file_is_native (base_file))
+		    if (!_gtk_file_has_native_path (base_file))
 		      retval = FALSE;
                     g_object_unref (base_file);
 		  }
@@ -2276,6 +2324,34 @@ filter_model_visible_func (GtkTreeModel *model,
 	  }
       }
       break;
+    case ROW_TYPE_EMPTY_SELECTION:
+      {
+	gboolean popup_shown;
+
+	g_object_get (priv->combo_box,
+		      "popup-shown", &popup_shown,
+		      NULL);
+
+	if (popup_shown)
+	  retval = FALSE;
+	else
+	  {
+	    GFile *selected;
+
+	    /* When the combo box is not popped up... */
+
+	    selected = get_selected_file (button);
+	    if (selected)
+	      retval = FALSE; /* ... nonempty selection means the ROW_TYPE_EMPTY_SELECTION is *not* visible... */
+	    else
+	      retval = TRUE;  /* ... and empty selection means the ROW_TYPE_EMPTY_SELECTION *is* visible */
+
+	    if (selected)
+	      g_object_unref (selected);
+	  }
+
+	break;
+      }
     default:
       retval = TRUE;
       break;
@@ -2317,7 +2393,22 @@ combo_box_row_separator_func (GtkTreeModel *model,
   return (type == ROW_TYPE_BOOKMARK_SEPARATOR ||
 	  type == ROW_TYPE_CURRENT_FOLDER_SEPARATOR ||
 	  type == ROW_TYPE_OTHER_SEPARATOR);
-}			  
+}
+
+static void
+select_combo_box_row_no_notify (GtkFileChooserButton *button, int pos)
+{
+  GtkFileChooserButtonPrivate *priv = button->priv;
+  GtkTreeIter iter, filter_iter;
+  
+  gtk_tree_model_iter_nth_child (priv->model, &iter, NULL, pos);
+  gtk_tree_model_filter_convert_child_iter_to_iter (GTK_TREE_MODEL_FILTER (priv->filter_model),
+						    &filter_iter, &iter);
+
+  g_signal_handler_block (priv->combo_box, priv->combo_box_changed_id);
+  gtk_combo_box_set_active_iter (GTK_COMBO_BOX (priv->combo_box), &filter_iter);
+  g_signal_handler_unblock (priv->combo_box, priv->combo_box_changed_id);
+}
 
 static void
 update_combo_box (GtkFileChooserButton *button)
@@ -2327,11 +2418,11 @@ update_combo_box (GtkFileChooserButton *button)
   GtkTreeIter iter;
   gboolean row_found;
 
-  gtk_tree_model_get_iter_first (priv->filter_model, &iter);
-
-  file = gtk_file_chooser_get_file (GTK_FILE_CHOOSER (priv->dialog));
+  file = get_selected_file (button);
 
   row_found = FALSE;
+
+  gtk_tree_model_get_iter_first (priv->filter_model, &iter);
 
   do
     {
@@ -2382,24 +2473,26 @@ update_combo_box (GtkFileChooserButton *button)
     }
   while (!row_found && gtk_tree_model_iter_next (priv->filter_model, &iter));
 
-  /* If it hasn't been found already, update & select the current-folder row. */
-  if (!row_found && file)
+  if (!row_found)
     {
-      GtkTreeIter filter_iter;
       gint pos;
-    
-      model_update_current_folder (button, file);
+
+      /* If it hasn't been found already, update & select the current-folder row. */
+      if (file)
+	{
+	  model_update_current_folder (button, file);
+	  pos = model_get_type_position (button, ROW_TYPE_CURRENT_FOLDER);
+	}
+      else
+	{
+	  /* No selection; switch to that row */
+
+	  pos = model_get_type_position (button, ROW_TYPE_EMPTY_SELECTION);
+	}
+
       gtk_tree_model_filter_refilter (GTK_TREE_MODEL_FILTER (priv->filter_model));
 
-      pos = model_get_type_position (button, ROW_TYPE_CURRENT_FOLDER);
-      gtk_tree_model_iter_nth_child (priv->model, &iter, NULL, pos);
-
-      gtk_tree_model_filter_convert_child_iter_to_iter (GTK_TREE_MODEL_FILTER (priv->filter_model),
-							&filter_iter, &iter);
-
-      g_signal_handler_block (priv->combo_box, priv->combo_box_changed_id);
-      gtk_combo_box_set_active_iter (GTK_COMBO_BOX (priv->combo_box), &filter_iter);
-      g_signal_handler_unblock (priv->combo_box, priv->combo_box_changed_id);
+      select_combo_box_row_no_notify (button, pos);
     }
 
   if (file)
@@ -2451,7 +2544,8 @@ update_label_and_image (GtkFileChooserButton *button)
   gchar *label_text;
   GFile *file;
 
-  file = gtk_file_chooser_get_file (GTK_FILE_CHOOSER (priv->dialog));
+  file = get_selected_file (button);
+
   label_text = NULL;
 
   if (priv->update_button_cancellable)
@@ -2490,7 +2584,7 @@ update_label_and_image (GtkFileChooserButton *button)
           _gtk_file_system_volume_unref (volume);
 
           if (label_text)
-            goto out;
+	      goto out;
         }
 
       if (g_file_is_native (file))
@@ -2513,10 +2607,11 @@ update_label_and_image (GtkFileChooserButton *button)
           if (pixbuf)
             g_object_unref (pixbuf);
         }
-
-      g_object_unref (file);
     }
 out:
+
+  if (file)
+    g_object_unref (file);
 
   if (label_text)
     {
@@ -2685,21 +2780,17 @@ combo_box_changed_cb (GtkComboBox *combo_box,
 	case ROW_TYPE_SHORTCUT:
 	case ROW_TYPE_BOOKMARK:
 	case ROW_TYPE_CURRENT_FOLDER:
-	  gtk_file_chooser_unselect_all (GTK_FILE_CHOOSER (priv->dialog));
 	  if (data)
-	    gtk_file_chooser_set_current_folder_file (GTK_FILE_CHOOSER (priv->dialog),
-						      data, NULL);
+	    gtk_file_chooser_button_set_current_folder (GTK_FILE_CHOOSER (button), data, NULL);
 	  break;
 	case ROW_TYPE_VOLUME:
 	  {
 	    GFile *base_file;
 
-	    gtk_file_chooser_unselect_all (GTK_FILE_CHOOSER (priv->dialog));
 	    base_file = _gtk_file_system_volume_get_root (data);
 	    if (base_file)
 	      {
-		gtk_file_chooser_set_current_folder_file (GTK_FILE_CHOOSER (priv->dialog),
-							  base_file, NULL);
+		gtk_file_chooser_button_set_current_folder (GTK_FILE_CHOOSER (button), base_file, NULL);
 		g_object_unref (base_file);
 	      }
 	  }
@@ -2710,6 +2801,50 @@ combo_box_changed_cb (GtkComboBox *combo_box,
 	default:
 	  break;
 	}
+    }
+}
+
+/* Calback for the "notify::popup-shown" signal on the combo box.
+ * When the combo is popped up, we don't want the ROW_TYPE_EMPTY_SELECTION to be visible
+ * at all; otherwise we would be showing a "(None)" item in the combo box's popup.
+ *
+ * However, when the combo box is *not* popped up, we want the empty-selection row
+ * to be visible depending on the selection.
+ *
+ * Since all that is done through the filter_model_visible_func(), this means
+ * that we need to refilter the model when the combo box pops up - hence the
+ * present signal handler.
+ */
+static void
+combo_box_notify_popup_shown_cb (GObject    *object,
+				 GParamSpec *pspec,
+				 gpointer    user_data)
+{
+  GtkFileChooserButton *button = GTK_FILE_CHOOSER_BUTTON (user_data);
+  GtkFileChooserButtonPrivate *priv = button->priv;
+  gboolean popup_shown;
+
+  g_object_get (priv->combo_box,
+		"popup-shown", &popup_shown,
+		NULL);
+
+  /* Indicate that the ROW_TYPE_EMPTY_SELECTION will change visibility... */
+  gtk_tree_model_filter_refilter (GTK_TREE_MODEL_FILTER (priv->filter_model));
+
+  /* If the combo box popup got dismissed, go back to showing the ROW_TYPE_EMPTY_SELECTION if needed */
+  if (!popup_shown)
+    {
+      GFile *selected = get_selected_file (button);
+
+      if (!selected)
+	{
+	  int pos;
+
+	  pos = model_get_type_position (button, ROW_TYPE_EMPTY_SELECTION);
+	  select_combo_box_row_no_notify (button, pos);
+	}
+      else
+	g_object_unref (selected);
     }
 }
 
@@ -2786,7 +2921,7 @@ dialog_notify_cb (GObject    *dialog,
 
 	  /* If the path isn't local but we're in local-only mode now, remove
 	   * the custom-folder row */
-	  if (data && g_file_is_native (G_FILE (data)) &&
+	  if (data && !_gtk_file_has_native_path (G_FILE (data)) &&
 	      gtk_file_chooser_get_local_only (GTK_FILE_CHOOSER (priv->dialog)))
 	    {
 	      pos--;
@@ -2824,9 +2959,6 @@ dialog_response_cb (GtkDialog *dialog,
 
       g_signal_emit_by_name (button, "current-folder-changed");
       g_signal_emit_by_name (button, "selection-changed");
-
-      update_label_and_image (button);
-      update_combo_box (button);
     }
   else
     {
@@ -2843,6 +2975,9 @@ dialog_response_cb (GtkDialog *dialog,
 				priv->dialog_selection_changed_id);
       priv->active = FALSE;
     }
+
+  update_label_and_image (button);
+  update_combo_box (button);
 
   gtk_widget_set_sensitive (priv->combo_box, TRUE);
   gtk_widget_hide (priv->dialog);
